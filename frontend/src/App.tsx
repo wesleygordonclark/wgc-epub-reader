@@ -3,9 +3,7 @@ import React, { useEffect, useMemo, useState } from 'react'
 const API = import.meta.env.VITE_API || 'http://localhost:8080'
 
 type Book = { id: string; title: string; author: string }
-
 type SpineItem = { idref: string; href: string; mediaType: string; title: string }
-
 type TOC = { items: { href: string; text: string }[] }
 
 export default function App() {
@@ -72,11 +70,18 @@ export default function App() {
           <div style={{marginTop:16}}>
             <h3>Table of Contents</h3>
             <div className="toc">
-              {toc.items.map((i, idx) => (
-                <a key={idx} href="#" onClick={(e)=>{e.preventDefault(); setChapterUrl(`${API}/api/books/${activeId}/file/${i.href.startsWith('#') ? spine[0]?.href + i.href : i.href}`)}}>
-                  {i.text}
-                </a>
-              ))}
+              {toc.items.map((i, idx) => {
+                const href = `${API}/api/books/${activeId}/file/${i.href}`
+                return (
+                  <a
+                    key={idx}
+                    href={href}
+                    onClick={(e)=>{ e.preventDefault(); setChapterUrl(href) }}
+                  >
+                    {i.text}
+                  </a>
+                )
+              })}
             </div>
           </div>
         )}

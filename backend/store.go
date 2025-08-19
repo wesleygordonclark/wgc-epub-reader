@@ -170,7 +170,12 @@ func (s *Store) GetSpine(w http.ResponseWriter, r *http.Request) {
 	var out []SpineItem
 	for _, sp := range b.OPF.Spine {
 		it := itemsByID[sp.IDRef]
-		out = append(out, SpineItem{IDRef: sp.IDRef, Href: normJoin(path.Dir(b.RootFile), it.Href), Type: it.MediaType, Title: ""})
+		out = append(out, SpineItem{
+			IDRef: sp.IDRef,
+			Href:  normJoin(path.Dir(b.RootFile), it.Href),
+			Type:  it.MediaType,
+			Title: "",
+		})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
@@ -184,6 +189,8 @@ func (s *Store) GetTOC(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	// TOC items are already normalized during ingest() so the frontend
+	// can safely build /api/books/{id}/file/{Href} (with optional #fragment).
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(b.TOC)
 }
@@ -193,6 +200,21 @@ func (s *Store) GetBookByID(id string) (*BookInfo, bool) {
 	defer s.mu.RUnlock()
 	b, ok := s.books[id]
 	return b, ok
+}
+
+func (s *Store) ContentHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	id := vars["id"]
+
+	// Extract the subpath after /epub/{id}/content/
+	prefix := fmt.Sprintf("/epub/%s/content/", id)
+	relPath := r.URL.Path[len(prefix):]
+
+	// Path to the EPUB extraction directory
+	basePath := fmt.Sprintf("./uploads/%s/extracted", id)
+	fullPath := filepath.Join(basePath, relPath)
+
+	http.ServeFile(w, r, fullPath)
 }
 
 // ingest unpacks and indexes an EPUB from uploaded multipart file.
@@ -236,11 +258,54 @@ func (s *Store) ingest(file multipart.File, header *multipart.FileHeader) (strin
 		return "", nil, err
 	}
 
-	// attempt to parse nav document for TOC (if any)
+	// attempt to parse nav document for TOC (if any), and NORMALIZE its hrefs
 	toc := &NavDoc{Items: []NavItem{}}
 	if nav := findNavItem(opf); nav != "" {
-		items, _ := extractNav(filepath.Join(root, filepath.FromSlash(normJoin(path.Dir(rootfile), nav))))
-		toc.Items = items
+		// relative path to nav doc inside the EPUB (relative to unpacked root)
+		navRel := normJoin(path.Dir(rootfile), nav)
+		navFS := filepath.Join(root, filepath.FromSlash(navRel))
+		items, _ := extractNav(navFS)
+
+		// base for resolving relative links inside nav doc
+		navBase := path.Dir(navRel) // relative to book root (unpacked)
+		// first spine href (used when TOC has fragment-only entries like "#foo")
+		firstSpine := firstSpineHref(opf, rootfile)
+
+		normalized := make([]NavItem, 0, len(items))
+		for _, it := range items {
+			h := strings.TrimSpace(it.Href)
+			switch {
+			case h == "":
+				continue
+			case strings.HasPrefix(h, "#"):
+				// fragment-only -> attach to first spine doc (if any)
+				base := firstSpine
+				if base == "" {
+					// fallback: nav doc as base
+					base = navRel
+				}
+				normalized = append(normalized, NavItem{
+					Href: base + h,
+					Text: it.Text,
+				})
+			case strings.HasPrefix(h, "http://") || strings.HasPrefix(h, "https://") || strings.HasPrefix(h, "data:"):
+				// external or data URI: pass through as-is
+				normalized = append(normalized, NavItem{Href: h, Text: it.Text})
+			default:
+				// relative to nav doc location -> normalize to path inside EPUB root
+				frag := ""
+				if i := strings.IndexByte(h, '#'); i >= 0 {
+					frag = h[i:]
+					h = h[:i]
+				}
+				resolved := normJoin(navBase, h)
+				if frag != "" {
+					resolved += frag
+				}
+				normalized = append(normalized, NavItem{Href: resolved, Text: it.Text})
+			}
+		}
+		toc.Items = normalized
 	}
 
 	info := &BookInfo{
@@ -337,6 +402,21 @@ func findNavItem(p *OPFPackage) string {
 	// prefer shortest path (often nav.xhtml)
 	sort.Slice(candidates, func(i, j int) bool { return len(candidates[i]) < len(candidates[j]) })
 	return candidates[0]
+}
+
+// firstSpineHref returns the first spine doc href normalized to OPF base (relative to root).
+func firstSpineHref(p *OPFPackage, rootfile string) string {
+	if len(p.Spine) == 0 {
+		return ""
+	}
+	itemsByID := map[string]OPFItem{}
+	for _, it := range p.Manifest {
+		itemsByID[it.ID] = it
+	}
+	if it, ok := itemsByID[p.Spine[0].IDRef]; ok {
+		return normJoin(path.Dir(rootfile), it.Href)
+	}
+	return ""
 }
 
 func extractNav(navPath string) ([]NavItem, error) {

@@ -34,6 +34,7 @@ func main() {
 	r.HandleFunc("/api/books/{id}/metadata", store.GetMetadata).Methods("GET")
 	r.HandleFunc("/api/books/{id}/spine", store.GetSpine).Methods("GET")
 	r.HandleFunc("/api/books/{id}/toc", store.GetTOC).Methods("GET")
+	r.HandleFunc("/epub/{id}/content/", store.ContentHandler).Methods("GET")
 	// Serve any resource from the unpacked book root (html, css, images, fonts)
 	r.PathPrefix("/api/books/{id}/file/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		vars := mux.Vars(r)
